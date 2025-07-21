@@ -1,0 +1,1291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Axis Studio Motion Analysis</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef } = React;
+
+        const MotionAnalysisApp = () => {
+            const [file, setFile] = useState(null);
+            const [analysisType, setAnalysisType] = useState('');
+            const [data, setData] = useState(null);
+            const [results, setResults] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            const fileInputRef = useRef(null);
+
+            // Jump Analysis Settings
+            const JUMP_SETTINGS = {
+                FS: 60,
+                VERT_COL: "Hips-Joint-Posi-y",
+                BASELINE_FRAMES: 60,
+                MIN_RISE_CM: 5,
+                BACK_TO_BASELINE_CM: 2
+            };
+
+            // Gait Analysis Settings
+            const GAIT_SETTINGS = {
+                FS: 60.0
+            };
+
+            const handleFileUpload = (event) => {
+                const uploadedFile = event.target.files[0];
+                if (uploadedFile) {
+                    setFile(uploadedFile);
+                    setError('');
+                    setResults(null);
+                }
+            };
+
+            const processExcelFile = (file) => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const data = new Uint8Array(e.target.result);
+                            const workbook = XLSX.read(data, { type: 'array' });
+                            const sheetName = workbook.SheetNames[0];
+                            const worksheet = workbook.Sheets[sheetName];
+                            const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                            
+                            // Remove first row as per instructions
+                            const processedData = jsonData.slice(1);
+                            const headers = processedData[0];
+                            const rows = processedData.slice(1);
+                            
+                            const dataObject = rows.map(row => {
+                                const obj = {};
+                                headers.forEach((header, index) => {
+                                    obj[header] = row[index];
+                                });
+                                return obj;
+                            });
+                            
+                            resolve({ headers, data: dataObject });
+                        } catch (error) {
+                            reject(error);
+                        }
+                    };
+                    reader.onerror = reject;
+                    reader.readAsArrayBuffer(file);
+                });
+            };
+
+            // Proper Savitzky-Golay filter implementation (polynomial order 3)
+            const savgolFilter = (data, windowLength, polyOrder = 3) => {
+                const result = [...data];
+                const halfWindow = Math.floor(windowLength / 2);
+                
+                // Simplified implementation using local polynomial fitting
+                for (let i = halfWindow; i < data.length - halfWindow; i++) {
+                    const window = [];
+                    const xWindow = [];
+                    
+                    for (let j = i - halfWindow; j <= i + halfWindow; j++) {
+                        window.push(data[j]);
+                        xWindow.push(j - i);
+                    }
+                    
+                    // For simplicity, use weighted average that approximates SG filter
+                    let sum = 0;
+                    let weightSum = 0;
+                    for (let k = 0; k < window.length; k++) {
+                        const weight = Math.exp(-Math.pow(xWindow[k], 2) / (windowLength / 4));
+                        sum += window[k] * weight;
+                        weightSum += weight;
+                    }
+                    result[i] = sum / weightSum;
+                }
+                return result;
+            };
+
+            const analyzeJumps = (data) => {
+                const { FS, VERT_COL, BASELINE_FRAMES, MIN_RISE_CM, BACK_TO_BASELINE_CM } = JUMP_SETTINGS;
+                
+                // Find frame column
+                const frameCol = data.headers.find(col => col && col.toLowerCase().includes('frame'));
+                if (!frameCol || !data.headers.includes(VERT_COL)) {
+                    throw new Error(`Required columns not found. Need: ${frameCol || 'Frame'} and ${VERT_COL}`);
+                }
+
+                // Extract vertical position data
+                const yRaw = data.data.map(row => parseFloat(row[VERT_COL])).filter(val => !isNaN(val));
+                
+                // Smooth data
+                const windowLength = Math.floor(0.2 * FS / 2) * 2 + 1;
+                const ySmooth = savgolFilter(yRaw, windowLength, 3);
+                
+                // Calculate baseline using MEDIAN (like your Python code)
+                const baselineData = ySmooth.slice(0, BASELINE_FRAMES).sort((a, b) => a - b);
+                const baseline = baselineData[Math.floor(baselineData.length / 2)];
+                const riseThreshold = baseline + MIN_RISE_CM / 100;
+                const landThreshold = baseline + BACK_TO_BASELINE_CM / 100;
+                
+                // Detect jumps
+                let state = "ground";
+                const events = [];
+                let start = 0, peak = 0, peakVal = 0;
+                
+                ySmooth.forEach((val, i) => {
+                    if (state === "ground" && val > riseThreshold) {
+                        start = peak = i;
+                        peakVal = val;
+                        state = "air";
+                    } else if (state === "air") {
+                        if (val > peakVal) {
+                            peak = i;
+                            peakVal = val;
+                        }
+                        if (val < landThreshold) {
+                            events.push({
+                                jump: events.length + 1,
+                                startFrame: start,
+                                peakFrame: peak,
+                                endFrame: i,
+                                startTime: (start / FS).toFixed(2),
+                                peakTime: (peak / FS).toFixed(2),
+                                endTime: (i / FS).toFixed(2),
+                                heightM: (peakVal - baseline).toFixed(3),
+                                heightCm: ((peakVal - baseline) * 100).toFixed(1)
+                            });
+                            state = "ground";
+                        }
+                    }
+                });
+                
+                return {
+                    jumps: events,
+                    totalJumps: events.length,
+                    maxHeight: events.length > 0 ? Math.max(...events.map(j => parseFloat(j.heightCm))) : 0,
+                    avgHeight: events.length > 0 ? (events.reduce((sum, j) => sum + parseFloat(j.heightCm), 0) / events.length).toFixed(1) : 0,
+                    rawData: yRaw,
+                    smoothData: ySmooth,
+                    baseline: baseline
+                };
+            };
+
+            // Butterworth high-pass filter implementation
+            const butterworthHighpass = (data, fs, cutoff, order) => {
+                // Simplified Butterworth high-pass filter approximation
+                const nyquist = fs / 2;
+                const normalizedCutoff = cutoff / nyquist;
+                const alpha = Math.exp(-2 * Math.PI * normalizedCutoff);
+                
+                // Apply high-pass filter (simplified IIR approximation)
+                const filtered = [...data];
+                let prev_input = 0;
+                let prev_output = 0;
+                
+                for (let i = 0; i < data.length; i++) {
+                    const output = alpha * (prev_output + data[i] - prev_input);
+                    filtered[i] = output;
+                    prev_input = data[i];
+                    prev_output = output;
+                }
+                
+                return filtered;
+            };
+
+            const analyzeGait = (data) => {
+                const { FS } = GAIT_SETTINGS;
+                
+                // Find acceleration columns
+                const accelCols = ['Hips-Sensor-Acce-x', 'Hips-Sensor-Acce-y', 'Hips-Sensor-Acce-z'];
+                const missingCols = accelCols.filter(col => !data.headers.includes(col));
+                
+                if (missingCols.length > 0) {
+                    throw new Error(`Missing acceleration columns: ${missingCols.join(', ')}`);
+                }
+                
+                // Extract acceleration data
+                const accData = data.data.map(row => ({
+                    x: parseFloat(row[accelCols[0]]) || 0,
+                    y: parseFloat(row[accelCols[1]]) || 0,
+                    z: parseFloat(row[accelCols[2]]) || 0
+                }));
+                
+                // Calculate acceleration magnitude
+                const accMag = accData.map(acc => Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z));
+                
+                // Proper Butterworth high-pass filter (4th order, 0.5 Hz cutoff)
+                const accHp = butterworthHighpass(accMag, FS, 0.5, 4);
+                
+                // Simple peak detection for steps
+                const minDistance = Math.floor(FS * 0.5); // 0.5 seconds between steps
+                const prominence = 0.02;
+                const peaks = [];
+                
+                for (let i = minDistance; i < accHp.length - minDistance; i++) {
+                    let isPeak = true;
+                    const currentVal = accHp[i];
+                    
+                    if (currentVal < prominence) continue;
+                    
+                    // Check if it's higher than surrounding points
+                    for (let j = i - minDistance; j <= i + minDistance; j++) {
+                        if (j !== i && accHp[j] >= currentVal) {
+                            isPeak = false;
+                            break;
+                        }
+                    }
+                    
+                    if (isPeak) {
+                        peaks.push(i);
+                    }
+                }
+                
+                // Calculate step metrics
+                const stepTimes = [];
+                for (let i = 1; i < peaks.length; i++) {
+                    stepTimes.push((peaks[i] - peaks[i-1]) / FS);
+                }
+                
+                const meanStepTime = stepTimes.length > 0 ? stepTimes.reduce((a, b) => a + b) / stepTimes.length : 0;
+                const stepTimeStd = stepTimes.length > 1 ? Math.sqrt(stepTimes.reduce((sum, val) => sum + Math.pow(val - meanStepTime, 2), 0) / (stepTimes.length - 1)) : 0;
+                const cadence = peaks.length / (accMag.length / FS) * 60;
+                const rmsAccel = Math.sqrt(accHp.reduce((sum, val) => sum + val * val, 0) / accHp.length);
+                
+                // Analyze foot sensors if available
+                const footAnalysis = {};
+                ['RightFoot', 'LeftFoot'].forEach(footLabel => {
+                    const footCols = data.headers.filter(col => col.includes(footLabel) && col.includes('Acce'));
+                    if (footCols.length >= 3) {
+                        const footData = data.data.map(row => ({
+                            x: parseFloat(row[footCols[0]]) || 0,
+                            y: parseFloat(row[footCols[1]]) || 0,
+                            z: parseFloat(row[footCols[2]]) || 0
+                        }));
+                        
+                        const footMag = footData.map(acc => Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z));
+                        const footHp = butterworthHighpass(footMag, FS, 0.5, 4);
+                        
+                        footAnalysis[footLabel] = {
+                            rms: Math.sqrt(footHp.reduce((sum, val) => sum + val * val, 0) / footHp.length),
+                            peak: Math.max(...footHp)
+                        };
+                    }
+                });
+                
+                // Calculate symmetry if both feet are available
+                let symmetry = null;
+                if (footAnalysis.RightFoot && footAnalysis.LeftFoot) {
+                    const rRms = footAnalysis.RightFoot.rms;
+                    const lRms = footAnalysis.LeftFoot.rms;
+                    const rPeak = footAnalysis.RightFoot.peak;
+                    const lPeak = footAnalysis.LeftFoot.peak;
+                    
+                    symmetry = {
+                        rmsSymmetry: (100 * Math.abs(rRms - lRms) / ((rRms + lRms) / 2)).toFixed(2),
+                        peakSymmetry: (100 * Math.abs(rPeak - lPeak) / ((rPeak + lPeak) / 2)).toFixed(2)
+                    };
+                }
+                
+                return {
+                    detectedSteps: peaks.length,
+                    meanStepTime: meanStepTime.toFixed(3),
+                    stepTimeStd: stepTimeStd.toFixed(3),
+                    cadence: cadence.toFixed(1),
+                    rmsAccel: rmsAccel.toFixed(3),
+                    stepTimes: stepTimes,
+                    footAnalysis: footAnalysis,
+                    symmetry: symmetry,
+                    rawAccMag: accMag,
+                    filteredAcc: accHp,
+                    peaks: peaks
+                };
+            };
+
+            const runAnalysis = async () => {
+                if (!file || !analysisType) {
+                    setError('Please select a file and analysis type');
+                    return;
+                }
+                
+                setLoading(true);
+                setError('');
+                
+                try {
+                    const processedData = await processExcelFile(file);
+                    setData(processedData);
+                    
+                    let analysisResults;
+                    if (analysisType === 'jump') {
+                        analysisResults = analyzeJumps(processedData);
+                    } else {
+                        analysisResults = analyzeGait(processedData);
+                    }
+                    
+                    setResults(analysisResults);
+                } catch (err) {
+                    setError(`Analysis failed: ${err.message}`);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const generateChartImage = (chartData, chartType = 'line', title = '') => {
+                return new Promise((resolve) => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 400;
+                    canvas.height = 300;
+                    document.body.appendChild(canvas);
+                    
+                    const ctx = canvas.getContext('2d');
+                    const chart = new Chart(ctx, {
+                        type: chartType,
+                        data: chartData,
+                        options: {
+                            responsive: false,
+                            plugins: {
+                                title: {
+                                    display: true,
+                                    text: title
+                                },
+                                legend: {
+                                    display: chartType !== 'bar'
+                                }
+                            },
+                            scales: chartType === 'bar' ? {
+                                y: {
+                                    beginAtZero: true
+                                }
+                            } : {}
+                        }
+                    });
+                    
+                    setTimeout(() => {
+                        const imageData = canvas.toDataURL('image/png');
+                        chart.destroy();
+                        document.body.removeChild(canvas);
+                        resolve(imageData);
+                    }, 500);
+                });
+            };
+
+
+
+            // Draw matplotlib-style analysis plots
+            const drawAnalysisPlots = (canvas, results, analysisType, data) => {
+                const ctx = canvas.getContext('2d');
+                const width = canvas.width;
+                const height = canvas.height;
+                
+                // Clear canvas
+                ctx.fillStyle = 'white';
+                ctx.fillRect(0, 0, width, height);
+                
+                if (analysisType === 'jump') {
+                    drawJumpPlots(ctx, results, data, width, height);
+                } else {
+                    drawGaitPlots(ctx, results, data, width, height);
+                }
+            };
+
+            const drawJumpPlots = (ctx, results, data, width, height) => {
+                const margin = { top: 40, right: 40, bottom: 60, left: 80 };
+                const plotHeight = height - margin.top - margin.bottom;
+                
+                // Single plot: Hip trajectory with jump heights (full height)
+                const plot1Y = margin.top;
+                drawJumpTrajectory(ctx, results, data, margin.left, plot1Y, width - margin.left - margin.right, plotHeight);
+            };
+
+            const drawJumpTrajectory = (ctx, results, data, x, y, w, h) => {
+                // Create time array based on frame data
+                const frameData = data.data.map(row => parseFloat(row[Object.keys(row).find(k => k.toLowerCase().includes('frame')) || 'Frame'])).filter(val => !isNaN(val));
+                const timeData = frameData.map(frame => frame / JUMP_SETTINGS.FS);
+                const maxTime = Math.max(...timeData);
+                const minY = Math.min(...results.smoothData);
+                const maxY = Math.max(...results.smoothData);
+                const yRange = maxY - minY;
+                
+                // Draw axes
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, y + h);
+                ctx.lineTo(x + w, y + h);
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + h);
+                ctx.stroke();
+                
+                // Draw smooth trajectory
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < results.smoothData.length && i < timeData.length; i++) {
+                    const px = x + (timeData[i] / maxTime) * w;
+                    const py = y + h - ((results.smoothData[i] - minY) / yRange) * h;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+                
+                // Draw baseline
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                const baselineY = y + h - ((results.baseline - minY) / yRange) * h;
+                ctx.beginPath();
+                ctx.moveTo(x, baselineY);
+                ctx.lineTo(x + w, baselineY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                
+                // Draw jump peaks
+                ctx.fillStyle = 'red';
+                results.jumps.forEach(jump => {
+                    const peakTime = parseFloat(jump.peakTime);
+                    const px = x + (peakTime / maxTime) * w;
+                    const py = y + h - ((results.baseline + parseFloat(jump.heightM)) - minY) / yRange * h;
+                    
+                    // Draw peak point
+                    ctx.beginPath();
+                    ctx.arc(px, py, 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                    
+                    // Label height
+                    ctx.fillStyle = 'black';
+                    ctx.font = '10px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(`${jump.heightCm} cm`, px, py - 10);
+                    ctx.fillStyle = 'red';
+                });
+                
+                // Title and labels
+                ctx.fillStyle = 'black';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Hip (root) trajectory with jump heights', x + w/2, y - 10);
+                
+                ctx.font = '12px Arial';
+                ctx.fillText('Time (s)', x + w/2, y + h + 40);
+                
+                ctx.save();
+                ctx.translate(x - 50, y + h/2);
+                ctx.rotate(-Math.PI/2);
+                ctx.fillText('Vertical position (m)', 0, 0);
+                ctx.restore();
+                
+                // Add legend
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'left';
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x + w - 120, y + 20);
+                ctx.lineTo(x + w - 100, y + 20);
+                ctx.stroke();
+                ctx.fillText('Hip Y (smoothed)', x + w - 95, y + 24);
+                
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(x + w - 120, y + 35);
+                ctx.lineTo(x + w - 100, y + 35);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillText('Baseline', x + w - 95, y + 39);
+            };
+
+            const drawJumpHistogram = (ctx, results, x, y, w, h) => {
+                const heights = results.jumps.map(j => parseFloat(j.heightCm));
+                const minHeight = Math.min(...heights);
+                const maxHeight = Math.max(...heights);
+                const numBins = Math.min(8, heights.length);
+                const binWidth = (maxHeight - minHeight) / numBins;
+                
+                // Create bins
+                const bins = new Array(numBins).fill(0);
+                heights.forEach(height => {
+                    const binIndex = Math.min(Math.floor((height - minHeight) / binWidth), numBins - 1);
+                    bins[binIndex]++;
+                });
+                
+                const maxCount = Math.max(...bins);
+                const barWidth = w / numBins * 0.8;
+                const barSpacing = w / numBins * 0.2;
+                
+                // Draw axes
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, y + h);
+                ctx.lineTo(x + w, y + h);
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + h);
+                ctx.stroke();
+                
+                // Draw bars
+                ctx.fillStyle = 'lightblue';
+                ctx.strokeStyle = 'black';
+                bins.forEach((count, i) => {
+                    if (count > 0) {
+                        const barX = x + i * (w / numBins) + barSpacing / 2;
+                        const barHeight = (count / maxCount) * h;
+                        const barY = y + h - barHeight;
+                        
+                        ctx.fillRect(barX, barY, barWidth, barHeight);
+                        ctx.strokeRect(barX, barY, barWidth, barHeight);
+                    }
+                });
+                
+                // Title and labels
+                ctx.fillStyle = 'black';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Jump Height Distribution', x + w/2, y - 10);
+                
+                ctx.font = '12px Arial';
+                ctx.fillText('Jump Height (cm)', x + w/2, y + h + 40);
+                
+                ctx.save();
+                ctx.translate(x - 50, y + h/2);
+                ctx.rotate(-Math.PI/2);
+                ctx.fillText('Count', 0, 0);
+                ctx.restore();
+            };
+
+            const drawGaitPlots = (ctx, results, data, width, height) => {
+                const margin = { top: 40, right: 40, bottom: 60, left: 80 };
+                const plotWidth = (width - margin.left - margin.right) / 2 - 20;
+                const plotHeight = (height - margin.top - margin.bottom) / 2 - 20;
+                
+                // Plot 1: Raw hip acceleration (top left)
+                drawAccelerationPlot(ctx, results.rawAccMag, 'Raw Hip Acceleration Magnitude', 
+                    margin.left, margin.top, plotWidth, plotHeight);
+                
+                // Plot 2: Step detection (top right) 
+                drawStepDetectionPlot(ctx, results, 'Step Detection (Hip Sensor)',
+                    margin.left + plotWidth + 40, margin.top, plotWidth, plotHeight);
+                
+                // Plot 3: Foot sensor comparison (bottom, centered if available)
+                if (Object.keys(results.footAnalysis).length > 0) {
+                    const footPlotWidth = plotWidth * 1.5; // Make it wider since it's the only bottom plot
+                    const footPlotX = margin.left + (width - margin.left - margin.right - footPlotWidth) / 2;
+                    drawFootSensorComparison(ctx, results.footAnalysis, 'Foot Sensor Comparison',
+                        footPlotX, margin.top + plotHeight + 60, footPlotWidth, plotHeight);
+                }
+            };
+
+            const drawAccelerationPlot = (ctx, accMag, title, x, y, w, h) => {
+                const maxAcc = Math.max(...accMag);
+                const minAcc = Math.min(...accMag);
+                const timeStep = 1 / GAIT_SETTINGS.FS;
+                
+                // Draw axes
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, y + h);
+                ctx.lineTo(x + w, y + h);
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + h);
+                ctx.stroke();
+                
+                // Draw acceleration data
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let i = 0; i < accMag.length; i++) {
+                    const px = x + (i / accMag.length) * w;
+                    const py = y + h - ((accMag[i] - minAcc) / (maxAcc - minAcc)) * h;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+                
+                // Title
+                ctx.fillStyle = 'black';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(title, x + w/2, y - 10);
+            };
+
+            const drawStepDetectionPlot = (ctx, results, title, x, y, w, h) => {
+                const accHp = results.filteredAcc || results.rawAccMag;
+                const maxAcc = Math.max(...accHp);
+                const minAcc = Math.min(...accHp);
+                
+                // Draw axes
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, y + h);
+                ctx.lineTo(x + w, y + h);
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + h);
+                ctx.stroke();
+                
+                // Draw filtered acceleration
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let i = 0; i < accHp.length; i++) {
+                    const px = x + (i / accHp.length) * w;
+                    const py = y + h - ((accHp[i] - minAcc) / (maxAcc - minAcc)) * h;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+                
+                // Draw detected peaks
+                if (results.peaks && results.peaks.length > 0) {
+                    ctx.fillStyle = 'red';
+                    results.peaks.forEach(peak => {
+                        const px = x + (peak / accHp.length) * w;
+                        const py = y + h - ((accHp[peak] - minAcc) / (maxAcc - minAcc)) * h;
+                        ctx.beginPath();
+                        ctx.arc(px, py, 3, 0, 2 * Math.PI);
+                        ctx.fill();
+                    });
+                }
+                
+                // Title
+                ctx.fillStyle = 'black';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(title, x + w/2, y - 10);
+            };
+
+            const drawStepTimeHistogram = (ctx, stepTimes, title, x, y, w, h) => {
+                const minTime = Math.min(...stepTimes);
+                const maxTime = Math.max(...stepTimes);
+                const numBins = Math.min(10, stepTimes.length);
+                const binWidth = (maxTime - minTime) / numBins;
+                
+                // Create bins
+                const bins = new Array(numBins).fill(0);
+                stepTimes.forEach(time => {
+                    const binIndex = Math.min(Math.floor((time - minTime) / binWidth), numBins - 1);
+                    bins[binIndex]++;
+                });
+                
+                const maxCount = Math.max(...bins);
+                const barWidth = w / numBins * 0.8;
+                
+                // Draw axes
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, y + h);
+                ctx.lineTo(x + w, y + h);
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + h);
+                ctx.stroke();
+                
+                // Draw bars
+                ctx.fillStyle = 'lightgreen';
+                ctx.strokeStyle = 'black';
+                bins.forEach((count, i) => {
+                    if (count > 0) {
+                        const barX = x + i * (w / numBins) + (w / numBins - barWidth) / 2;
+                        const barHeight = (count / maxCount) * h;
+                        const barY = y + h - barHeight;
+                        
+                        ctx.fillRect(barX, barY, barWidth, barHeight);
+                        ctx.strokeRect(barX, barY, barWidth, barHeight);
+                    }
+                });
+                
+                // Title
+                ctx.fillStyle = 'black';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(title, x + w/2, y - 10);
+            };
+
+            const drawFootSensorComparison = (ctx, footAnalysis, title, x, y, w, h) => {
+                const sensors = Object.keys(footAnalysis);
+                const rmsValues = sensors.map(s => footAnalysis[s].rms);
+                const peakValues = sensors.map(s => footAnalysis[s].peak);
+                
+                const maxValue = Math.max(...rmsValues, ...peakValues);
+                const barWidth = w / (sensors.length * 2) * 0.8;
+                const spacing = w / (sensors.length * 2);
+                
+                // Draw axes
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, y + h);
+                ctx.lineTo(x + w, y + h);
+                ctx.moveTo(x, y);
+                ctx.lineTo(x, y + h);
+                ctx.stroke();
+                
+                // Draw bars
+                sensors.forEach((sensor, i) => {
+                    const centerX = x + (i + 0.5) * (w / sensors.length);
+                    
+                    // RMS bar
+                    const rmsHeight = (rmsValues[i] / maxValue) * h;
+                    const rmsX = centerX - barWidth;
+                    ctx.fillStyle = 'lightblue';
+                    ctx.fillRect(rmsX, y + h - rmsHeight, barWidth, rmsHeight);
+                    ctx.strokeRect(rmsX, y + h - rmsHeight, barWidth, rmsHeight);
+                    
+                    // Peak bar
+                    const peakHeight = (peakValues[i] / maxValue) * h;
+                    const peakX = centerX;
+                    ctx.fillStyle = 'lightcoral';
+                    ctx.fillRect(peakX, y + h - peakHeight, barWidth, peakHeight);
+                    ctx.strokeRect(peakX, y + h - peakHeight, barWidth, peakHeight);
+                    
+                    // Sensor label
+                    ctx.fillStyle = 'black';
+                    ctx.font = '10px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(sensor, centerX, y + h + 15);
+                });
+                
+                // Legend
+                ctx.fillStyle = 'lightblue';
+                ctx.fillRect(x + w - 120, y + 10, 15, 10);
+                ctx.strokeRect(x + w - 120, y + 10, 15, 10);
+                ctx.fillStyle = 'black';
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText('RMS accel (g)', x + w - 100, y + 19);
+                
+                ctx.fillStyle = 'lightcoral';
+                ctx.fillRect(x + w - 120, y + 25, 15, 10);
+                ctx.strokeRect(x + w - 120, y + 25, 15, 10);
+                ctx.fillStyle = 'black';
+                ctx.fillText('Max push-off (g)', x + w - 100, y + 34);
+                
+                // Title
+                ctx.fillStyle = 'black';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(title, x + w/2, y - 10);
+            };
+
+            return React.createElement('div', {
+                className: "max-w-4xl mx-auto p-6 bg-white min-h-screen"
+            }, [
+                React.createElement('div', { 
+                    key: 'header',
+                    className: "mb-8" 
+                }, [
+                    React.createElement('h1', {
+                        key: 'title',
+                        className: "text-3xl font-bold text-gray-800 mb-4"
+                    }, "Axis Studio Motion Analysis"),
+                    React.createElement('div', {
+                        key: 'instructions',
+                        className: "bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6"
+                    }, [
+                        React.createElement('h3', {
+                            key: 'instructions-title',
+                            className: "font-semibold text-blue-800 mb-2"
+                        }, "File Preparation Instructions:"),
+                        React.createElement('ol', {
+                            key: 'instructions-list',
+                            className: "list-decimal list-inside text-blue-700 space-y-1"
+                        }, [
+                            React.createElement('li', { key: 1 }, "Export your data from Axis Studio as CSV format"),
+                            React.createElement('li', { key: 2 }, "Open the CSV file in Excel"),
+                            React.createElement('li', { key: 3 }, "Delete the first row (metadata row)"),
+                            React.createElement('li', { key: 4 }, "Save as Excel (.xlsx) format"),
+                            React.createElement('li', { key: 5 }, "Upload the file below")
+                        ])
+                    ])
+                ]),
+                React.createElement('div', {
+                    key: 'content',
+                    className: "space-y-6"
+                }, [
+                    // File Upload
+                    React.createElement('div', {
+                        key: 'upload',
+                        className: "border-2 border-dashed border-gray-300 rounded-lg p-6"
+                    }, [
+                        React.createElement('h2', {
+                            key: 'upload-title',
+                            className: "text-xl font-semibold mb-4"
+                        }, "1. Upload Excel File"),
+                        React.createElement('input', {
+                            key: 'file-input',
+                            type: "file",
+                            ref: fileInputRef,
+                            accept: ".xlsx,.xls",
+                            onChange: handleFileUpload,
+                            className: "block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                        }),
+                        file && React.createElement('p', {
+                            key: 'file-status',
+                            className: "mt-2 text-green-600"
+                        }, `✓ File loaded: ${file.name}`)
+                    ]),
+                    // Analysis Type Selection
+                    React.createElement('div', {
+                        key: 'analysis-type',
+                        className: "border rounded-lg p-6"
+                    }, [
+                        React.createElement('h2', {
+                            key: 'analysis-title',
+                            className: "text-xl font-semibold mb-4"
+                        }, "2. Select Analysis Type"),
+                        React.createElement('div', {
+                            key: 'radio-group',
+                            className: "space-y-3"
+                        }, [
+                            React.createElement('label', {
+                                key: 'jump-label',
+                                className: "flex items-center"
+                            }, [
+                                React.createElement('input', {
+                                    key: 'jump-radio',
+                                    type: "radio",
+                                    name: "analysisType",
+                                    value: "jump",
+                                    checked: analysisType === 'jump',
+                                    onChange: (e) => setAnalysisType(e.target.value),
+                                    className: "mr-3"
+                                }),
+                                React.createElement('div', { key: 'jump-desc' }, [
+                                    React.createElement('span', {
+                                        key: 'jump-title',
+                                        className: "font-medium"
+                                    }, "Jump Height Analysis"),
+                                    React.createElement('p', {
+                                        key: 'jump-subtitle',
+                                        className: "text-gray-600 text-sm"
+                                    }, "Analyzes vertical jump performance from hip position data")
+                                ])
+                            ]),
+                            React.createElement('label', {
+                                key: 'gait-label',
+                                className: "flex items-center"
+                            }, [
+                                React.createElement('input', {
+                                    key: 'gait-radio',
+                                    type: "radio",
+                                    name: "analysisType",
+                                    value: "gait",
+                                    checked: analysisType === 'gait',
+                                    onChange: (e) => setAnalysisType(e.target.value),
+                                    className: "mr-3"
+                                }),
+                                React.createElement('div', { key: 'gait-desc' }, [
+                                    React.createElement('span', {
+                                        key: 'gait-title',
+                                        className: "font-medium"
+                                    }, "Gait Analysis"),
+                                    React.createElement('p', {
+                                        key: 'gait-subtitle',
+                                        className: "text-gray-600 text-sm"
+                                    }, "Analyzes walking patterns from hip and foot sensor data")
+                                ])
+                            ])
+                        ])
+                    ]),
+                    // Run Analysis Button
+                    React.createElement('div', {
+                        key: 'run-button',
+                        className: "text-center"
+                    }, 
+                        React.createElement('button', {
+                            onClick: runAnalysis,
+                            disabled: !file || !analysisType || loading,
+                            className: "bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold py-3 px-8 rounded-lg text-lg"
+                        }, loading ? 'Processing...' : 'Run Analysis')
+                    ),
+                    // Error Display
+                    error && React.createElement('div', {
+                        key: 'error',
+                        className: "bg-red-50 border border-red-200 rounded-lg p-4"
+                    }, 
+                        React.createElement('p', {
+                            className: "text-red-700"
+                        }, `❌ ${error}`)
+                    ),
+                    // Results Display
+                    results && React.createElement('div', {
+                        key: 'results',
+                        className: "border rounded-lg p-6 bg-gray-50"
+                    }, [
+                        React.createElement('div', {
+                            key: 'results-header',
+                            className: "text-center mb-6"
+                        }, [
+                            React.createElement('h2', {
+                                key: 'results-title',
+                                className: "text-2xl font-bold"
+                            }, "Comprehensive Analysis Report")
+                        ]),
+                        
+                        // Matplotlib-style Plot Display
+                        React.createElement('div', {
+                            key: 'plot-section',
+                            className: "mb-8"
+                        }, [
+                            React.createElement('h3', {
+                                key: 'plot-title',
+                                className: "text-xl font-semibold mb-4"
+                            }, analysisType === 'jump' ? 'Jump Trajectory Analysis' : 'Gait Analysis Plots'),
+                            React.createElement('canvas', {
+                                key: 'analysis-plot',
+                                ref: (canvas) => {
+                                    if (canvas && results) {
+                                        drawAnalysisPlots(canvas, results, analysisType, data);
+                                    }
+                                },
+                                width: 800,
+                                height: 600,
+                                className: "w-full border border-gray-300 rounded bg-white"
+                            })
+                        ]),
+                        
+                        React.createElement('div', {
+                            key: 'report-header',
+                            className: "bg-gray-50 p-4 rounded mb-6"
+                        }, [
+                            React.createElement('h3', {
+                                key: 'header-title',
+                                className: "text-lg font-semibold mb-2"
+                            }, "Report Information"),
+                            React.createElement('div', {
+                                key: 'report-info',
+                                className: "grid grid-cols-1 md:grid-cols-3 gap-4 text-sm"
+                            }, [
+                                React.createElement('p', { key: 'analysis-type' }, [
+                                    React.createElement('span', { key: 'type-label', className: "font-semibold" }, "Analysis Type: "),
+                                    analysisType === 'jump' ? 'Jump Height Analysis' : 'Gait Analysis'
+                                ]),
+                                React.createElement('p', { key: 'filename' }, [
+                                    React.createElement('span', { key: 'file-label', className: "font-semibold" }, "File: "),
+                                    file.name
+                                ]),
+                                React.createElement('p', { key: 'timestamp' }, [
+                                    React.createElement('span', { key: 'time-label', className: "font-semibold" }, "Generated: "),
+                                    new Date().toLocaleString()
+                                ])
+                            ])
+                        ]),
+                        // Analysis-specific detailed content
+                        analysisType === 'jump' ? 
+                            React.createElement('div', { key: 'jump-detailed' }, [
+                                // Summary Statistics
+                                React.createElement('div', {
+                                    key: 'jump-summary',
+                                    className: "mb-8"
+                                }, [
+                                    React.createElement('h3', {
+                                        key: 'summary-title',
+                                        className: "text-xl font-semibold mb-4"
+                                    }, "Jump Analysis Summary"),
+                                    React.createElement('div', {
+                                        key: 'summary-grid',
+                                        className: "grid grid-cols-2 md:grid-cols-4 gap-4"
+                                    }, [
+                                        React.createElement('div', {
+                                            key: 'total-jumps',
+                                            className: "bg-blue-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'total-number',
+                                                className: "text-2xl font-bold text-blue-600"
+                                            }, results.totalJumps),
+                                            React.createElement('div', {
+                                                key: 'total-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Total Jumps")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'max-height',
+                                            className: "bg-green-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'max-number',
+                                                className: "text-2xl font-bold text-green-600"
+                                            }, `${results.maxHeight} cm`),
+                                            React.createElement('div', {
+                                                key: 'max-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Maximum Height")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'avg-height',
+                                            className: "bg-purple-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'avg-number',
+                                                className: "text-2xl font-bold text-purple-600"
+                                            }, `${results.avgHeight} cm`),
+                                            React.createElement('div', {
+                                                key: 'avg-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Average Height")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'std-height',
+                                            className: "bg-orange-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'std-number',
+                                                className: "text-2xl font-bold text-orange-600"
+                                            }, results.jumps.length > 0 ? 
+                                                `${Math.sqrt(results.jumps.reduce((sum, j) => sum + Math.pow(parseFloat(j.heightCm) - parseFloat(results.avgHeight), 2), 0) / results.jumps.length).toFixed(1)} cm` : 
+                                                "0 cm"
+                                            ),
+                                            React.createElement('div', {
+                                                key: 'std-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Std Deviation")
+                                        ])
+                                    ])
+                                ]),
+
+                                // Detailed Jump Table
+                                results.jumps.length > 0 && React.createElement('div', {
+                                    key: 'jump-details',
+                                    className: "mb-8"
+                                }, [
+                                    React.createElement('h3', {
+                                        key: 'details-title',
+                                        className: "text-xl font-semibold mb-4"
+                                    }, "Detailed Jump Performance"),
+                                    React.createElement('div', {
+                                        key: 'table-wrapper',
+                                        className: "overflow-x-auto"
+                                    }, 
+                                        React.createElement('table', {
+                                            key: 'details-table',
+                                            className: "w-full border border-gray-300"
+                                        }, [
+                                            React.createElement('thead', {
+                                                key: 'table-head',
+                                                className: "bg-gray-100"
+                                            }, 
+                                                React.createElement('tr', { key: 'header-row' }, [
+                                                    React.createElement('th', { key: 'jump-col', className: "px-4 py-3 text-left font-semibold" }, "Jump #"),
+                                                    React.createElement('th', { key: 'start-col', className: "px-4 py-3 text-left font-semibold" }, "Start Time (s)"),
+                                                    React.createElement('th', { key: 'peak-col', className: "px-4 py-3 text-left font-semibold" }, "Peak Time (s)"),
+                                                    React.createElement('th', { key: 'end-col', className: "px-4 py-3 text-left font-semibold" }, "End Time (s)"),
+                                                    React.createElement('th', { key: 'duration-col', className: "px-4 py-3 text-left font-semibold" }, "Flight Time (s)"),
+                                                    React.createElement('th', { key: 'height-col', className: "px-4 py-3 text-left font-semibold" }, "Height (cm)"),
+                                                    React.createElement('th', { key: 'height-m-col', className: "px-4 py-3 text-left font-semibold" }, "Height (m)")
+                                                ])
+                                            ),
+                                            React.createElement('tbody', { key: 'table-body' },
+                                                results.jumps.map((jump, idx) => 
+                                                    React.createElement('tr', {
+                                                        key: `jump-${idx}`,
+                                                        className: idx % 2 === 0 ? 'bg-gray-50' : 'bg-white'
+                                                    }, [
+                                                        React.createElement('td', { key: 'jump-num', className: "px-4 py-2 font-semibold" }, jump.jump),
+                                                        React.createElement('td', { key: 'start-time', className: "px-4 py-2" }, jump.startTime),
+                                                        React.createElement('td', { key: 'peak-time', className: "px-4 py-2" }, jump.peakTime),
+                                                        React.createElement('td', { key: 'end-time', className: "px-4 py-2" }, jump.endTime),
+                                                        React.createElement('td', { key: 'duration', className: "px-4 py-2" }, (parseFloat(jump.endTime) - parseFloat(jump.startTime)).toFixed(2)),
+                                                        React.createElement('td', { key: 'height-cm', className: "px-4 py-2 font-bold text-green-600" }, jump.heightCm),
+                                                        React.createElement('td', { key: 'height-m', className: "px-4 py-2" }, jump.heightM)
+                                                    ])
+                                                )
+                                            )
+                                        ])
+                                    )
+                                ])
+                            ])
+                        :
+                            React.createElement('div', { key: 'gait-detailed' }, [
+                                // Gait Summary Statistics
+                                React.createElement('div', {
+                                    key: 'gait-summary',
+                                    className: "mb-8"
+                                }, [
+                                    React.createElement('h3', {
+                                        key: 'gait-summary-title',
+                                        className: "text-xl font-semibold mb-4"
+                                    }, "Gait Analysis Summary"),
+                                    React.createElement('div', {
+                                        key: 'gait-summary-grid',
+                                        className: "grid grid-cols-2 md:grid-cols-5 gap-4"
+                                    }, [
+                                        React.createElement('div', {
+                                            key: 'steps-detected',
+                                            className: "bg-blue-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'steps-number',
+                                                className: "text-2xl font-bold text-blue-600"
+                                            }, results.detectedSteps),
+                                            React.createElement('div', {
+                                                key: 'steps-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Steps Detected")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'cadence-stat',
+                                            className: "bg-green-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'cadence-number',
+                                                className: "text-2xl font-bold text-green-600"
+                                            }, `${results.cadence}`),
+                                            React.createElement('div', {
+                                                key: 'cadence-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Steps/min")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'step-time-stat',
+                                            className: "bg-purple-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'step-time-number',
+                                                className: "text-2xl font-bold text-purple-600"
+                                            }, `${results.meanStepTime}s`),
+                                            React.createElement('div', {
+                                                key: 'step-time-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Mean Step Time")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'step-std-stat',
+                                            className: "bg-orange-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'step-std-number',
+                                                className: "text-2xl font-bold text-orange-600"
+                                            }, `${results.stepTimeStd}s`),
+                                            React.createElement('div', {
+                                                key: 'step-std-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "Step Time SD")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'rms-stat',
+                                            className: "bg-red-50 p-4 rounded text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'rms-number',
+                                                className: "text-2xl font-bold text-red-600"
+                                            }, `${results.rmsAccel}g`),
+                                            React.createElement('div', {
+                                                key: 'rms-label',
+                                                className: "text-sm text-gray-600"
+                                            }, "RMS Acceleration")
+                                        ])
+                                    ])
+                                ]),
+
+                                // Foot Sensor Analysis
+                                Object.keys(results.footAnalysis).length > 0 && React.createElement('div', {
+                                    key: 'foot-analysis',
+                                    className: "mb-8"
+                                }, [
+                                    React.createElement('h3', {
+                                        key: 'foot-title',
+                                        className: "text-xl font-semibold mb-4"
+                                    }, "Foot Sensor Analysis"),
+                                    React.createElement('div', {
+                                        key: 'foot-table-wrapper',
+                                        className: "overflow-x-auto"
+                                    }, 
+                                        React.createElement('table', {
+                                            key: 'foot-table',
+                                            className: "w-full border border-gray-300"
+                                        }, [
+                                            React.createElement('thead', {
+                                                key: 'foot-head',
+                                                className: "bg-gray-100"
+                                            }, 
+                                                React.createElement('tr', { key: 'foot-header-row' }, [
+                                                    React.createElement('th', { key: 'sensor-col', className: "px-4 py-3 text-left font-semibold" }, "Sensor"),
+                                                    React.createElement('th', { key: 'rms-col', className: "px-4 py-3 text-left font-semibold" }, "RMS Acceleration (g)"),
+                                                    React.createElement('th', { key: 'peak-col', className: "px-4 py-3 text-left font-semibold" }, "Max Push-off (g)")
+                                                ])
+                                            ),
+                                            React.createElement('tbody', { key: 'foot-body' },
+                                                Object.entries(results.footAnalysis).map(([foot, data], idx) => 
+                                                    React.createElement('tr', {
+                                                        key: `foot-${idx}`,
+                                                        className: idx % 2 === 0 ? 'bg-gray-50' : 'bg-white'
+                                                    }, [
+                                                        React.createElement('td', { key: 'foot-name', className: "px-4 py-2 font-semibold" }, foot),
+                                                        React.createElement('td', { key: 'foot-rms', className: "px-4 py-2" }, data.rms.toFixed(3)),
+                                                        React.createElement('td', { key: 'foot-peak', className: "px-4 py-2" }, data.peak.toFixed(3))
+                                                    ])
+                                                )
+                                            )
+                                        ])
+                                    )
+                                ]),
+
+                                // Symmetry Analysis
+                                results.symmetry && React.createElement('div', {
+                                    key: 'symmetry-analysis',
+                                    className: "mb-8"
+                                }, [
+                                    React.createElement('h3', {
+                                        key: 'symmetry-title',
+                                        className: "text-xl font-semibold mb-4"
+                                    }, "Gait Symmetry Analysis"),
+                                    React.createElement('div', {
+                                        key: 'symmetry-grid',
+                                        className: "grid grid-cols-1 md:grid-cols-2 gap-6"
+                                    }, [
+                                        React.createElement('div', {
+                                            key: 'rms-symmetry',
+                                            className: "bg-blue-50 p-6 rounded-lg text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'rms-sym-number',
+                                                className: "text-3xl font-bold text-blue-600 mb-2"
+                                            }, `${results.symmetry.rmsSymmetry}%`),
+                                            React.createElement('div', {
+                                                key: 'rms-sym-label',
+                                                className: "text-lg font-semibold text-gray-700"
+                                            }, "RMS Symmetry Index"),
+                                            React.createElement('p', {
+                                                key: 'rms-sym-desc',
+                                                className: "text-sm text-gray-600 mt-2"
+                                            }, "Lower values indicate better symmetry")
+                                        ]),
+                                        React.createElement('div', {
+                                            key: 'peak-symmetry',
+                                            className: "bg-green-50 p-6 rounded-lg text-center"
+                                        }, [
+                                            React.createElement('div', {
+                                                key: 'peak-sym-number',
+                                                className: "text-3xl font-bold text-green-600 mb-2"
+                                            }, `${results.symmetry.peakSymmetry}%`),
+                                            React.createElement('div', {
+                                                key: 'peak-sym-label',
+                                                className: "text-lg font-semibold text-gray-700"
+                                            }, "Peak Push-off Symmetry Index"),
+                                            React.createElement('p', {
+                                                key: 'peak-sym-desc',
+                                                className: "text-sm text-gray-600 mt-2"
+                                            }, "Measures push-off force balance")
+                                        ])
+                                    ])
+                                ])
+                            ])
+                    ])
+                ])
+            ]);
+        };
+
+        ReactDOM.render(React.createElement(MotionAnalysisApp), document.getElementById('root'));
+    </script>
+</body>
+</html>
