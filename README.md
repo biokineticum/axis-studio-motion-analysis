@@ -1,130 +1,175 @@
-Axis Studio Motion Analysis Tool
+# Demo Data Setup for GitHub Repository
 
-A comprehensive web-based application for analyzing motion capture data exported from Axis Studio. Performs professional-grade biomechanical analysis with real-time visualization and detailed reporting.
+## 📁 Directory Structure to Create
 
-🚀 Live Demo
+Add this folder structure to your GitHub repository:
 
-Try the tool here!
+```
+axis-studio-motion-analysis/
+├── index.html (your main app)
+├── README.md
+└── demo-data/
+    ├── README.md
+    ├── jump-analysis/
+    │   ├── jump_analysis_sample.xlsx
+    │   ├── athlete_jump_session.xlsx
+    │   └── README.md
+    ├── gait-analysis/
+    │   ├── walking_analysis_sample.xlsx
+    │   ├── running_gait_sample.xlsx
+    │   ├── clinical_gait_sample.xlsx
+    │   └── README.md
+    └── sample-outputs/
+        ├── jump_analysis_example.png
+        ├── gait_analysis_example.png
+        └── README.md
+```
 
-📋 Features
+## 📝 Demo Data README.md
 
-🏃‍♂️ Jump Height Analysis
+Create `demo-data/README.md`:
 
-Automatic jump detection from hip position data using state-based algorithms
-Professional trajectory plots with baseline thresholds and peak markers
-Comprehensive statistics: total jumps, max/average heights, standard deviation
-Detailed jump data table with precise timing and height measurements
-Savitzky-Golay filtering for data smoothing
-🚶‍♂️ Gait Analysis
-Step detection from hip and foot sensor acceleration data
-Multiple visualization plots: raw acceleration, step detection, foot sensor comparison
-Comprehensive gait metrics: cadence, step time statistics, RMS acceleration
-Symmetry analysis comparing left vs right foot sensors
-Butterworth high-pass filtering to remove gravity component
+```markdown
+# Demo Data for Axis Studio Motion Analysis
 
-🔧 Quick Start Guide
+This folder contains sample datasets to test the motion analysis tool immediately.
 
-Step 1: Prepare Your Data
-Export from Axis Studio: Export your motion capture data as CSV format
-Open in Excel: Load the CSV file in Microsoft Excel
-Remove metadata: Delete the first row (contains metadata, not data)
-Save as Excel: Save the file as Excel (.xlsx) format
-Upload: Use the prepared Excel file in the web application
-Step 2: Run Analysis
-Upload File: Select your prepared Excel file
-Choose Analysis Type:
-Jump Height Analysis - for vertical jump performance
-Gait Analysis - for walking/running patterns
-Run Analysis: Click the blue "Run Analysis" button
+## 🏃‍♂️ Jump Analysis Samples
 
-View Results: Comprehensive analysis with professional graphs appears instantly
+### jump_analysis_sample.xlsx
+- **Description**: Basic vertical jump performance data
+- **Duration**: ~10 seconds with 3-4 jumps
+- **Columns**: Frame, Hips-Joint-Posi-y (plus other standard Axis Studio columns)
+- **Use Case**: Test basic jump detection and height calculation
 
-📊 Understanding Your Results
-Jump Analysis Output
-Summary Statistics: Total jumps, maximum height, average height, standard deviation
-Trajectory Plot: Hip position over time with detected jump peaks marked
-Detailed Table: Individual jump data with start/peak/end times and heights
-Professional Visualization: Matplotlib-style plots with baselines and peak markers
-Gait Analysis Output
-Gait Metrics: Steps detected, cadence (steps/min), step timing statistics
-Acceleration Plots: Raw hip acceleration and filtered step detection
-Foot Sensor Analysis: RMS acceleration and peak push-off forces (when available)
-Symmetry Analysis: Left/right balance assessment with percentage indices
-Multi-panel Visualization: 3-panel layout showing different analysis aspects
+### athlete_jump_session.xlsx  
+- **Description**: Extended training session with multiple jumps
+- **Duration**: ~30 seconds with 8-10 jumps
+- **Columns**: Frame, Hips-Joint-Posi-y (plus other standard Axis Studio columns)  
+- **Use Case**: Analyze jump consistency and fatigue patterns
 
-📁 Required Data Columns
+## 🚶‍♂️ Gait Analysis Samples
 
-For Jump Analysis:
-Frame Column: Any column containing "frame" in the name
-Hip Position: Hips-Joint-Posi-y (vertical hip position)
-For Gait Analysis:
-Hip Acceleration:
-Hips-Sensor-Acce-x
-Hips-Sensor-Acce-y
-Hips-Sensor-Acce-z
+### walking_analysis_sample.xlsx
+- **Description**: Normal walking gait data
+- **Duration**: ~15 seconds of steady walking
+- **Columns**: Frame, Hips-Sensor-Acce-x/y/z, RightFoot-Sensor-Acce-x/y/z, LeftFoot-Sensor-Acce-x/y/z
+- **Use Case**: Basic gait parameter calculation and symmetry analysis
 
-Foot Sensors (optional, for enhanced analysis):
-RightFoot-Sensor-Acce-x/y/z
-LeftFoot-Sensor-Acce-x/y/z
-⚙️ Analysis Settings
+### running_gait_sample.xlsx
+- **Description**: Running stride analysis
+- **Duration**: ~12 seconds of steady running
+- **Columns**: Frame, Hips-Sensor-Acce-x/y/z, RightFoot-Sensor-Acce-x/y/z, LeftFoot-Sensor-Acce-x/y/z
+- **Use Case**: Higher cadence gait analysis with increased acceleration values
 
-Jump Analysis Parameters
+### clinical_gait_sample.xlsx
+- **Description**: Clinical assessment walking data with subtle asymmetries
+- **Duration**: ~20 seconds of controlled walking
+- **Columns**: Frame, Hips-Sensor-Acce-x/y/z, RightFoot-Sensor-Acce-x/y/z, LeftFoot-Sensor-Acce-x/y/z
+- **Use Case**: Demonstrate symmetry analysis and clinical applications
 
-JUMP_SETTINGS = {
-    FS: 60,                    // Sampling frequency (Hz)
-    BASELINE_FRAMES: 60,       // Frames for baseline calculation  
-    MIN_RISE_CM: 5,           // Minimum rise threshold (cm)
-    BACK_TO_BASELINE_CM: 2    // Landing detection threshold (cm)
-}
+## 🎯 How to Use Demo Data
 
+1. **Download** any sample file from this directory
+2. **Go to** [https://biokineticum.github.io/axis-studio-motion-analysis](https://biokineticum.github.io/axis-studio-motion-analysis)
+3. **Upload** the sample file (no preparation needed - already formatted)
+4. **Select** the appropriate analysis type (Jump or Gait)
+5. **Click** "Run Analysis" to see results immediately!
 
-Gait Analysis Parameters
+## 📊 Expected Results
 
-GAIT_SETTINGS = {
-    FS: 60.0,                 // Sampling frequency (Hz)
-    HIGH_PASS_CUTOFF: 0.5,    // High-pass filter cutoff (Hz)
-    MIN_STEP_INTERVAL: 0.5    // Minimum time between steps (s)
-}
+### Jump Analysis Output:
+- Professional trajectory plots with detected jump peaks
+- Summary statistics (total jumps, max height, average height, std deviation)
+- Detailed table with timing and height data for each jump
 
+### Gait Analysis Output:
+- Multi-panel visualization (acceleration, step detection, foot sensor comparison)
+- Gait metrics (cadence, step time statistics, RMS acceleration)
+- Symmetry indices when foot sensor data is available
 
-🛠️ Technical Implementation
+## 🔬 Data Format Notes
 
-Analysis Algorithms
-Jump Detection: State-based algorithm with configurable thresholds
-Data Smoothing: Savitzky-Golay filter (polynomial order 3)
-Peak Detection: Custom algorithm for jump apex identification
-Step Detection: Butterworth high-pass filtering + peak detection
-Symmetry Calculation: RMS and peak comparison between sensors
-Visualization
-Canvas-based Rendering: HTML5 Canvas with matplotlib-style plotting
-Professional Graphs: Axes, labels, legends, and grid formatting
-Real-time Display: Immediate results without server processing
-Responsive Design: Works on desktop, tablet, and mobile devices
-🌐 Browser Compatibility
-✅ Chrome 80+
-✅ Firefox 75+
-✅ Safari 13+
-✅ Edge 80+
+All demo files are:
+- ✅ **Pre-processed** - First metadata row already removed
+- ✅ **Excel format** - Ready for immediate upload
+- ✅ **Standard columns** - Following Axis Studio naming conventions
+- ✅ **Clean data** - No missing values or outliers
+- ✅ **Realistic values** - Represent actual human movement patterns
 
+## 📈 Sample Output Images
 
-📄 License
+Check the `sample-outputs/` folder for example screenshots showing what your analysis results should look like.
 
-MIT License - Free for research, commercial, and educational use.
-🏷️ Citation
-If you use this tool in your research, please cite:
+---
 
-Axis Studio Motion Analysis Tool
-https://github.com/yourusername/axis-studio-motion-analysis
+**Start analyzing motion data in under 30 seconds with these samples!** 🚀
+```
 
+## 📊 Sample Data Creation Guide
 
-Built for researchers, clinicians, and movement scientists working with Axis Studio motion capture data.
+### For Jump Analysis Demo Files:
 
-🎯 Perfect for:
-Sports performance analysis
-Research data processing
-Student projects and education
-Quick motion analysis needs
+Create Excel files with these columns:
 
-Start analyzing your motion data in under 2 minutes! 🚀
+* **Frame**: Sequential numbers (0, 1, 2, 3...)
 
+* **Hips-Joint-Posi-y**: Vertical position data with clear jump patterns
 
+  * Baseline around 1.0-1.2m
+  * Jump peaks reaching 1.3-1.6m
+  * Realistic jump durations (\~0.5-1.0 seconds)
+  * Multiple jumps with varying heights
+
+### For Gait Analysis Demo Files:
+
+Create Excel files with these columns:
+
+* **Frame**: Sequential numbers
+
+* **Hips-Sensor-Acce-x/y/z**: Hip acceleration data
+
+  * Realistic gait acceleration patterns
+  * Periodic step signatures
+  * Values typically 0.5-2.0g range
+
+* **RightFoot-Sensor-Acce-x/y/z**: Right foot acceleration
+
+* **LeftFoot-Sensor-Acce-x/y/z**: Left foot acceleration
+
+  * Clear push-off peaks
+  * Slight asymmetries for clinical sample
+
+## 🎯 Action Items:
+
+1. **Create demo-data folder** in your GitHub repository
+2. **Generate sample Excel files** using realistic biomechanical data
+3. **Add README files** with descriptions for each dataset
+4. **Take screenshots** of analysis results for the sample-outputs folder
+5. **Update main README** with links to demo data
+6. **Post on social media** using the promotional content above
+
+## 📄 License Information
+
+**Important**: This tool is licensed for **non-commercial use only**.
+
+### ✅ Permitted Uses:
+
+* **Academic research** and publications
+* **Educational purposes** in universities and schools
+* **Personal learning** and skill development
+* **Clinical research** (non-profit)
+* **Student projects** and thesis work
+
+### ❌ Not Permitted:
+
+* **Commercial analysis services**
+* **Selling analysis reports** to clients
+* **Integration into paid software**
+* **Business/consulting use** for profit
+
+### 💡 Commercial Licensing:
+
+For commercial use, please contact: \[<your-email@domain.com>]
+
+This setup will make your tool immediately accessible to researchers and provide a professional demonstration of its capabilities! 🚀
